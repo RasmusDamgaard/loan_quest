@@ -1,0 +1,1834 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LOAN QUEST: The Underwriter's Burden</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #111;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    font-family: 'Press Start 2P', 'Courier New', monospace;
+    overflow: hidden;
+  }
+  #game {
+    position: relative;
+    width: 800px;
+    background: #000;
+    border: 3px solid #555555;
+    box-shadow: 0 0 40px rgba(85,85,255,0.3);
+  }
+  #game::after {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      rgba(0,0,0,0.12) 0px,
+      rgba(0,0,0,0.12) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+    pointer-events: none;
+    z-index: 100;
+  }
+  canvas {
+    display: block;
+    width: 800px;
+    height: 340px;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+  }
+  #output {
+    height: 260px;
+    overflow-y: auto;
+    padding: 8px 12px;
+    border-top: 2px solid #555555;
+    background: #000000;
+    scrollbar-width: thin;
+    scrollbar-color: #555 #000;
+  }
+  #output::-webkit-scrollbar { width: 8px; }
+  #output::-webkit-scrollbar-track { background: #000; }
+  #output::-webkit-scrollbar-thumb { background: #555; }
+  #output div {
+    font-size: 11px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    margin-bottom: 2px;
+  }
+  #parser {
+    display: flex;
+    align-items: center;
+    padding: 8px 12px;
+    border-top: 2px solid #555555;
+    background: #000;
+  }
+  #parser .prompt {
+    color: #55FF55;
+    font-family: 'Press Start 2P', monospace;
+    font-size: 12px;
+    margin-right: 8px;
+  }
+  #parser input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: #55FF55;
+    font-family: 'Press Start 2P', monospace;
+    font-size: 12px;
+    caret-color: #55FF55;
+  }
+  .blink {
+    animation: blink 1s step-end infinite;
+  }
+  @keyframes blink {
+    50% { opacity: 0; }
+  }
+  #status-bar {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 12px;
+    background: #0000AA;
+    color: #FFFF55;
+    font-family: 'Press Start 2P', monospace;
+    font-size: 9px;
+    border-top: 1px solid #5555FF;
+  }
+</style>
+</head>
+<body>
+<div id="game">
+  <canvas id="screen" width="400" height="170"></canvas>
+  <div id="output"></div>
+  <div id="status-bar">
+    <span id="sb-day">DAY 1</span>
+    <span id="sb-info">FIRST FEDERAL SAVINGS BANK</span>
+    <span id="sb-score">RATING: --</span>
+  </div>
+  <div id="parser">
+    <span class="prompt">&gt;</span>
+    <input type="text" id="input" autofocus autocomplete="off" spellcheck="false">
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// EGA PALETTE
+// ═══════════════════════════════════════════════════════════════
+const EGA = {
+  BLACK:'#000000', BLUE:'#0000AA', GREEN:'#00AA00', CYAN:'#00AAAA',
+  RED:'#AA0000', MAGENTA:'#AA00AA', BROWN:'#AA5500', LGRAY:'#AAAAAA',
+  DGRAY:'#555555', LBLUE:'#5555FF', LGREEN:'#55FF55', LCYAN:'#55FFFF',
+  LRED:'#FF5555', LMAGENTA:'#FF55FF', YELLOW:'#FFFF55', WHITE:'#FFFFFF'
+};
+
+// ═══════════════════════════════════════════════════════════════
+// AUDIO
+// ═══════════════════════════════════════════════════════════════
+let audioCtx = null;
+function initAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+function beep(freq, dur, type='square', vol=0.08) {
+  if (!audioCtx) return;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.connect(g); g.connect(audioCtx.destination);
+  o.type = type; o.frequency.value = freq;
+  g.gain.value = vol;
+  o.start();
+  g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+  o.stop(audioCtx.currentTime + dur);
+}
+function sfxApprove() { beep(440,0.1); setTimeout(()=>beep(554,0.1),100); setTimeout(()=>beep(659,0.2),200); }
+function sfxDeny() { beep(330,0.15); setTimeout(()=>beep(262,0.3),150); }
+function sfxFlag() { beep(880,0.08); setTimeout(()=>beep(880,0.08),120); setTimeout(()=>beep(880,0.15),240); }
+function sfxError() { beep(150,0.4,'sawtooth',0.06); }
+function sfxType() { beep(1200,0.02,'square',0.03); }
+function sfxNewDay() { beep(523,0.15); setTimeout(()=>beep(659,0.15),150); setTimeout(()=>beep(784,0.15),300); setTimeout(()=>beep(1047,0.3),450); }
+
+// ═══════════════════════════════════════════════════════════════
+// CANVAS SETUP
+// ═══════════════════════════════════════════════════════════════
+const canvas = document.getElementById('screen');
+const ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+const CW = 400, CH = 170;
+
+// ═══════════════════════════════════════════════════════════════
+// DRAWING HELPERS
+// ═══════════════════════════════════════════════════════════════
+function cls(color=EGA.BLACK) { ctx.fillStyle=color; ctx.fillRect(0,0,CW,CH); }
+function rect(x,y,w,h,color) { ctx.fillStyle=color; ctx.fillRect(x,y,w,h); }
+function text(str,x,y,color=EGA.WHITE,size=8) {
+  ctx.fillStyle=color;
+  ctx.font=size+'px "Press Start 2P", monospace';
+  ctx.fillText(str,x,y);
+}
+function line(x1,y1,x2,y2,color) {
+  ctx.strokeStyle=color; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SCENE DRAWING
+// ═══════════════════════════════════════════════════════════════
+function drawTitle() {
+  cls(EGA.BLACK);
+  // Sky
+  rect(0,0,CW,100,EGA.BLUE);
+  // Stars
+  const stars = [[20,15],[55,30],[90,12],[140,25],[200,8],[250,35],[300,18],[350,10],[380,28],[160,40],[280,5],[60,45]];
+  stars.forEach(s => rect(s[0],s[1],2,2,EGA.WHITE));
+  // Moon
+  rect(330,15,20,20,EGA.YELLOW);
+  rect(335,12,20,20,EGA.BLUE);
+  // City skyline
+  rect(0,60,40,40,EGA.DGRAY); rect(2,65,8,4,EGA.YELLOW); rect(14,70,8,4,EGA.YELLOW); rect(26,65,8,4,EGA.BLACK);
+  rect(40,50,35,50,EGA.DGRAY); rect(45,55,6,4,EGA.YELLOW); rect(55,55,6,4,EGA.BLACK); rect(45,65,6,4,EGA.YELLOW); rect(55,65,6,4,EGA.YELLOW); rect(45,75,6,4,EGA.BLACK); rect(55,75,6,4,EGA.YELLOW);
+  rect(75,70,30,30,EGA.DGRAY); rect(80,75,6,4,EGA.YELLOW); rect(90,75,6,4,EGA.YELLOW); rect(80,85,6,4,EGA.BLACK);
+  rect(105,45,50,55,EGA.DGRAY); rect(112,50,8,4,EGA.YELLOW); rect(125,50,8,4,EGA.YELLOW); rect(138,50,8,4,EGA.BLACK); rect(112,60,8,4,EGA.BLACK); rect(125,60,8,4,EGA.YELLOW); rect(138,60,8,4,EGA.YELLOW); rect(112,70,8,4,EGA.YELLOW); rect(125,70,8,4,EGA.BLACK); rect(138,70,8,4,EGA.YELLOW); rect(112,80,8,4,EGA.YELLOW); rect(125,80,8,4,EGA.YELLOW);
+  rect(155,55,30,45,EGA.DGRAY); rect(160,60,6,4,EGA.YELLOW); rect(170,60,6,4,EGA.BLACK); rect(160,70,6,4,EGA.YELLOW); rect(170,70,6,4,EGA.YELLOW);
+  rect(185,65,45,35,EGA.DGRAY); rect(190,70,8,4,EGA.YELLOW); rect(205,70,8,4,EGA.YELLOW); rect(190,80,8,4,EGA.BLACK); rect(205,80,8,4,EGA.YELLOW);
+  rect(230,40,55,60,EGA.DGRAY); rect(237,45,8,4,EGA.YELLOW); rect(250,45,8,4,EGA.BLACK); rect(263,45,8,4,EGA.YELLOW); rect(237,55,8,4,EGA.BLACK); rect(250,55,8,4,EGA.YELLOW); rect(263,55,8,4,EGA.YELLOW); rect(237,65,8,4,EGA.YELLOW); rect(250,65,8,4,EGA.YELLOW); rect(263,65,8,4,EGA.BLACK); rect(237,75,8,4,EGA.YELLOW); rect(250,75,8,4,EGA.BLACK); rect(263,75,8,4,EGA.YELLOW); rect(237,85,8,4,EGA.YELLOW);
+  rect(285,60,35,40,EGA.DGRAY); rect(290,65,6,4,EGA.BLACK); rect(302,65,6,4,EGA.YELLOW); rect(290,75,6,4,EGA.YELLOW); rect(302,75,6,4,EGA.YELLOW);
+  rect(320,50,40,50,EGA.DGRAY); rect(325,55,8,4,EGA.YELLOW); rect(340,55,8,4,EGA.BLACK); rect(325,65,8,4,EGA.YELLOW); rect(340,65,8,4,EGA.YELLOW); rect(325,75,8,4,EGA.BLACK); rect(340,75,8,4,EGA.YELLOW);
+  rect(360,68,40,32,EGA.DGRAY); rect(365,73,6,4,EGA.YELLOW); rect(377,73,6,4,EGA.YELLOW); rect(365,83,6,4,EGA.YELLOW);
+  // Bank building - foreground
+  rect(120,85,160,15,EGA.LGRAY);
+  rect(125,78,150,10,EGA.LGRAY);
+  // Columns
+  for (let i=0;i<6;i++) { rect(133+i*25,85,4,15,EGA.WHITE); }
+  // Door
+  rect(185,90,30,10,EGA.BROWN); rect(196,90,8,10,EGA.DGRAY);
+  // Sign
+  rect(140,80,120,6,EGA.BLUE);
+  // Ground
+  rect(0,100,CW,70,EGA.DGRAY);
+  rect(0,100,CW,2,EGA.LGRAY);
+  // Title text
+  text('LOAN QUEST',95,122,EGA.YELLOW,16);
+  text("The Underwriter's Burden",72,140,EGA.LCYAN,8);
+  text('Press ENTER to begin',108,160,EGA.LGRAY,7);
+}
+
+function drawOffice() {
+  cls(EGA.BLUE);
+  // Wall
+  rect(0,0,CW,110,EGA.BLUE);
+  // Wallpaper pattern
+  for(let x=0;x<CW;x+=20) for(let y=0;y<110;y+=20) { rect(x+9,y+9,2,2,EGA.LBLUE); }
+  // Window
+  rect(15,15,90,65,EGA.DGRAY);
+  rect(18,18,84,59,EGA.CYAN);
+  // Sky through window
+  rect(18,18,84,35,EGA.LCYAN);
+  // Buildings through window
+  rect(20,38,15,15,EGA.DGRAY); rect(38,30,20,23,EGA.DGRAY); rect(62,35,12,18,EGA.DGRAY); rect(78,28,22,25,EGA.DGRAY);
+  rect(23,42,4,3,EGA.YELLOW); rect(32,42,4,3,EGA.YELLOW);
+  rect(42,34,5,3,EGA.YELLOW); rect(50,34,5,3,EGA.YELLOW); rect(42,40,5,3,EGA.YELLOW);
+  rect(82,32,5,3,EGA.YELLOW); rect(90,32,5,3,EGA.YELLOW); rect(82,38,5,3,EGA.YELLOW); rect(90,38,5,3,EGA.YELLOW);
+  // Window frame
+  rect(59,18,2,59,EGA.DGRAY); rect(18,46,84,2,EGA.DGRAY);
+  // Clock on wall
+  rect(140,20,24,24,EGA.WHITE);rect(142,22,20,20,EGA.LGRAY);
+  rect(151,24,2,10,EGA.BLACK); rect(152,32,8,2,EGA.BLACK);
+  rect(140,20,24,2,EGA.DGRAY); rect(140,20,2,24,EGA.DGRAY);
+  // Certificate on wall
+  rect(190,20,50,35,EGA.WHITE); rect(192,22,46,31,EGA.LGRAY);
+  rect(200,28,30,4,EGA.DGRAY); rect(204,35,22,3,EGA.DGRAY); rect(206,41,18,3,EGA.DGRAY);
+  // Filing cabinet
+  rect(310,30,50,80,EGA.DGRAY);
+  rect(312,32,46,24,EGA.LGRAY); rect(332,40,6,4,EGA.BROWN);
+  rect(312,58,46,24,EGA.LGRAY); rect(332,66,6,4,EGA.BROWN);
+  rect(312,84,46,24,EGA.LGRAY); rect(332,92,6,4,EGA.BROWN);
+  // Bookshelf
+  rect(370,15,28,95,EGA.BROWN);
+  rect(372,18,24,14,EGA.RED); rect(376,18,6,14,EGA.GREEN); rect(384,18,4,14,EGA.BLUE); rect(390,18,4,14,EGA.YELLOW);
+  rect(372,35,24,14,EGA.BLUE); rect(376,35,8,14,EGA.RED); rect(388,35,6,14,EGA.MAGENTA);
+  rect(372,52,24,14,EGA.GREEN); rect(380,52,4,14,EGA.BROWN); rect(386,52,8,14,EGA.RED);
+  rect(372,69,24,14,EGA.CYAN); rect(378,69,6,14,EGA.BROWN); rect(388,69,6,14,EGA.BLUE);
+  // Floor
+  rect(0,110,CW,60,EGA.BROWN);
+  for(let x=0;x<CW;x+=40) { line(x,110,x,CH,EGA.DGRAY); }
+  // Desk
+  rect(30,105,260,8,EGA.BROWN);
+  rect(30,105,260,3,EGA.LGRAY);
+  rect(35,113,8,45,EGA.BROWN); rect(275,113,8,45,EGA.BROWN);
+  // Computer monitor
+  rect(55,70,60,38,EGA.DGRAY);
+  rect(58,73,54,30,EGA.BLACK);
+  rect(60,75,50,26,EGA.GREEN);
+  // Green screen text
+  text('>_',64,88,EGA.LGREEN,6);
+  // Monitor stand
+  rect(75,108,20,5,EGA.DGRAY);
+  // Keyboard
+  rect(60,108,50,6,EGA.LGRAY);
+  // Paper stack on desk
+  rect(140,95,40,13,EGA.WHITE); rect(143,95,40,13,EGA.WHITE); rect(146,95,40,13,EGA.WHITE);
+  rect(148,98,30,2,EGA.LGRAY); rect(148,102,25,2,EGA.LGRAY);
+  // Coffee mug
+  rect(210,97,12,11,EGA.WHITE); rect(222,99,5,6,EGA.WHITE); rect(223,100,4,4,EGA.BLACK);
+  rect(212,97,8,3,EGA.BROWN);
+  // Phone
+  rect(240,98,30,10,EGA.DGRAY); rect(242,98,10,6,EGA.LGRAY);
+  // Pen holder
+  rect(195,98,10,10,EGA.DGRAY); rect(197,92,2,8,EGA.BLUE); rect(200,90,2,10,EGA.RED); rect(203,93,1,7,EGA.YELLOW);
+  // Chair (implied by position)
+  rect(120,130,80,40,EGA.DGRAY);
+  rect(130,128,60,5,EGA.DGRAY);
+  rect(155,115,10,15,EGA.DGRAY);
+}
+
+function drawDocView() {
+  cls(EGA.BLACK);
+  // Document paper
+  rect(100,10,200,150,EGA.WHITE);
+  rect(102,12,196,146,EGA.LGRAY);
+  // Header line
+  rect(120,20,160,8,EGA.BLUE);
+  text('DOCUMENT',140,27,EGA.WHITE,7);
+  // Lines suggesting text
+  for(let y=40;y<140;y+=12) {
+    rect(115,y,170*(0.6+Math.random()*0.4),4,EGA.DGRAY);
+  }
+  // Corner fold
+  ctx.fillStyle=EGA.DGRAY;
+  ctx.beginPath();ctx.moveTo(280,10);ctx.lineTo(300,10);ctx.lineTo(300,30);ctx.closePath();ctx.fill();
+  ctx.fillStyle=EGA.WHITE;
+  ctx.beginPath();ctx.moveTo(280,10);ctx.lineTo(280,30);ctx.lineTo(300,30);ctx.closePath();ctx.fill();
+}
+
+function drawDialog(name) {
+  drawOffice();
+  // Dialog box overlay
+  rect(20,20,180,120,EGA.BLACK);
+  rect(22,22,176,116,EGA.BLUE);
+  rect(24,24,172,112,EGA.BLACK);
+  // Character face
+  const faceX=40, faceY=40;
+  if(name==='Griggs') {
+    // Balding man, stern
+    rect(faceX,faceY,40,45,EGA.LGRAY); // face shape
+    rect(faceX+2,faceY+2,36,41,EGA.BROWN); // skin
+    rect(faceX+2,faceY-3,36,10,EGA.DGRAY); // hair (receding)
+    rect(faceX+10,faceY-3,20,5,EGA.BROWN); // bald spot
+    rect(faceX+8,faceY+14,8,4,EGA.BLACK); // left eye
+    rect(faceX+24,faceY+14,8,4,EGA.BLACK); // right eye
+    rect(faceX+6,faceY+12,12,2,EGA.DGRAY); // left eyebrow (angry)
+    rect(faceX+24,faceY+12,12,2,EGA.DGRAY); // right eyebrow
+    rect(faceX+14,faceY+24,12,6,EGA.BROWN); // nose
+    rect(faceX+10,faceY+34,20,4,EGA.RED); // mouth
+    // Tie
+    rect(faceX+16,faceY+45,8,15,EGA.RED);
+    rect(faceX+12,faceY+45,16,4,EGA.WHITE); // collar
+  } else if(name==='Agent Walsh') {
+    // FBI agent, sunglasses
+    rect(faceX,faceY,40,45,EGA.LGRAY);
+    rect(faceX+2,faceY+2,36,41,EGA.BROWN);
+    rect(faceX+2,faceY-5,36,14,EGA.BLACK); // dark hair
+    rect(faceX+6,faceY+14,12,5,EGA.BLACK); // left sunglass
+    rect(faceX+22,faceY+14,12,5,EGA.BLACK); // right sunglass
+    rect(faceX+18,faceY+14,4,5,EGA.BLACK); // bridge
+    rect(faceX+14,faceY+24,12,5,EGA.BROWN); // nose
+    rect(faceX+12,faceY+34,16,3,EGA.RED); // mouth (thin)
+    rect(faceX+12,faceY+45,16,4,EGA.WHITE);
+    rect(faceX+16,faceY+49,8,12,EGA.DGRAY); // dark tie
+  }
+  // Name plate
+  rect(30,96,80,14,EGA.DGRAY);
+  text(name,34,106,EGA.YELLOW,6);
+}
+
+function drawDayEnd(dayNum) {
+  cls(EGA.BLACK);
+  // Night sky
+  rect(0,0,CW,CH,EGA.BLUE);
+  for(let i=0;i<30;i++) rect(Math.random()*CW,Math.random()*80,1,1,EGA.WHITE);
+  // Moon
+  rect(40,15,16,16,EGA.YELLOW); rect(44,12,16,16,EGA.BLUE);
+  // City silhouette
+  for(let x=0;x<CW;x+=30) {
+    const h=20+Math.random()*50;
+    rect(x,100-h,25,h+70,EGA.BLACK);
+  }
+  // Ground
+  rect(0,100,CW,70,EGA.BLACK);
+  // Text
+  text('END OF DAY '+dayNum,110,125,EGA.YELLOW,12);
+  text('Review your performance...',100,150,EGA.LGRAY,7);
+}
+
+function drawEnding(type) {
+  cls(EGA.BLACK);
+  if(type==='perfect') {
+    rect(0,0,CW,CH,EGA.BLUE);
+    for(let i=0;i<40;i++) rect(Math.random()*CW,Math.random()*CH,2,2,EGA.YELLOW);
+    text('OUTSTANDING',100,50,EGA.YELLOW,14);
+    text('ANALYST',140,75,EGA.YELLOW,14);
+  } else if(type==='good') {
+    rect(0,0,CW,CH,EGA.BLUE);
+    text('COMMENDABLE',100,60,EGA.LGREEN,14);
+    text('SERVICE',140,85,EGA.LGREEN,14);
+  } else if(type==='mediocre') {
+    rect(0,0,CW,CH,EGA.DGRAY);
+    text('SATISFACTORY',95,60,EGA.YELLOW,12);
+    text('PERFORMANCE',100,85,EGA.LGRAY,12);
+  } else {
+    rect(0,0,CW,CH,EGA.BLACK);
+    rect(0,70,CW,30,EGA.RED);
+    text('TERMINATED',110,60,EGA.LRED,14);
+    text('YOUR SERVICES ARE',80,95,EGA.LGRAY,9);
+    text('NO LONGER REQUIRED',75,115,EGA.LGRAY,9);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// GAME DATA - APPLICANTS
+// ═══════════════════════════════════════════════════════════════
+const APPLICANTS = [
+  // ──── DAY 1 ────
+  {
+    id:1, day:1, name:"Margaret Chen",
+    app: {
+      name:"Margaret Chen", ssn:"XXX-XX-4821",
+      income:"$68,000 / year", employer:"Pacific NW Medical Group",
+      since:"March 2018", loanAmt:"$180,000",
+      property:"1247 Elm Street, Portland, OR", purpose:"Primary Residence"
+    },
+    credit: {
+      name:"Margaret Chen", ssn:"XXX-XX-4821",
+      score:740, monthlyDebt:"$800",
+      accounts:"4 open accounts, 0 delinquencies",
+      history:"12 years of credit history"
+    },
+    pay: {
+      employer:"Pacific NW Medical Group",
+      grossMonthly:"$5,667", period:"October 1987",
+      ytd:"$56,670"
+    },
+    employ: {
+      employer:"Pacific NW Medical Group",
+      position:"Senior Nurse", salary:"$68,000 / year",
+      startDate:"March 2018", letterDate:"November 1987",
+      contact:"(503) 555-0142"
+    },
+    appraisal: {
+      address:"1247 Elm Street, Portland, OR",
+      value:"$240,000", appraiser:"Oregon Property Assessors",
+      date:"October 1987",
+      comps:"Avg: $225,000 - $260,000"
+    },
+    verdict:"approve",
+    explanation:"All documents are consistent and meet guidelines.\nCredit: 740 (min 620). DTI: ~33% (max 43%). LTV: 75% (max 80%).",
+    wrongExplain:"This was a clean application. All documents matched\nand all figures were within guidelines.",
+    flags:[]
+  },
+  {
+    id:2, day:1, name:"Robert Simmons",
+    app: {
+      name:"Robert Simmons", ssn:"XXX-XX-7193",
+      income:"$45,000 / year", employer:"Simmons Auto Body",
+      since:"June 2015", loanAmt:"$200,000",
+      property:"892 Maple Drive, Portland, OR", purpose:"Primary Residence"
+    },
+    credit: {
+      name:"Robert Simmons", ssn:"XXX-XX-7193",
+      score:650, monthlyDebt:"$2,200",
+      accounts:"7 open accounts, 2 late payments",
+      history:"8 years of credit history"
+    },
+    pay: {
+      employer:"Simmons Auto Body",
+      grossMonthly:"$3,750", period:"October 1987",
+      ytd:"$37,500"
+    },
+    employ: {
+      employer:"Simmons Auto Body",
+      position:"Owner / Operator", salary:"$45,000 / year",
+      startDate:"June 2015", letterDate:"November 1987",
+      contact:"(503) 555-0287"
+    },
+    appraisal: {
+      address:"892 Maple Drive, Portland, OR",
+      value:"$260,000", appraiser:"Oregon Property Assessors",
+      date:"October 1987",
+      comps:"Avg: $245,000 - $275,000"
+    },
+    verdict:"deny",
+    explanation:"DTI ratio is far too high.\nMonthly debts ($2,200) + est. mortgage ($1,200) = $3,400.\n$3,400 / $3,750 monthly income = 90.7% DTI. Max is 43%.",
+    wrongExplain:"Robert Simmons' debt-to-income ratio was 90.7%,\nfar exceeding the 43% maximum. This loan should have\nbeen DENIED.",
+    flags:["HIGH DTI"]
+  },
+  // ──── DAY 2 ────
+  {
+    id:3, day:2, name:"James Whitfield",
+    app: {
+      name:"James Whitfield", ssn:"XXX-XX-5520",
+      income:"$72,000 / year", employer:"Whitfield & Associates",
+      since:"January 2016", loanAmt:"$165,000",
+      property:"340 Oak Avenue, Salem, OR", purpose:"Primary Residence"
+    },
+    credit: {
+      name:"James Whitfield", ssn:"XXX-XX-5520",
+      score:680, monthlyDebt:"$600",
+      accounts:"5 open accounts, 0 delinquencies",
+      history:"10 years of credit history"
+    },
+    pay: {
+      employer:"Whitfield & Associates",
+      grossMonthly:"$3,000", period:"October 1987",
+      ytd:"$30,000"
+    },
+    employ: {
+      employer:"Whitfield & Associates",
+      position:"Managing Partner", salary:"$72,000 / year",
+      startDate:"January 2016", letterDate:"November 1987",
+      contact:"(503) 555-0391"
+    },
+    appraisal: {
+      address:"340 Oak Avenue, Salem, OR",
+      value:"$220,000", appraiser:"Valley Appraisal Group",
+      date:"October 1987",
+      comps:"Avg: $200,000 - $235,000"
+    },
+    verdict:"deny",
+    explanation:"INCOME MISMATCH: Application claims $72,000/yr, but\npay stubs show $3,000/mo ($36,000/yr). The employment\nletter confirms $72,000 but the actual pay doesn't match.\nWith real income: DTI = ($600+$990)/$3,000 = 53%. DENY.",
+    wrongExplain:"James Whitfield's pay stubs showed $3,000/month\n($36,000/yr), NOT the $72,000 claimed on the application.\nThe discrepancy between pay stubs and application\nis a major red flag. Should have been DENIED.",
+    flags:["INCOME MISMATCH"]
+  },
+  {
+    id:4, day:2, name:"Sarah Mitchell",
+    app: {
+      name:"Sarah Mitchell", ssn:"XXX-XX-8834",
+      income:"$91,000 / year", employer:"Columbia Tech Solutions",
+      since:"August 2014", loanAmt:"$250,000",
+      property:"2180 River Road, Portland, OR", purpose:"Primary Residence"
+    },
+    credit: {
+      name:"Sarah Mitchell", ssn:"XXX-XX-8834",
+      score:725, monthlyDebt:"$400",
+      accounts:"3 open accounts, 0 delinquencies",
+      history:"15 years of credit history"
+    },
+    pay: {
+      employer:"Columbia Tech Solutions",
+      grossMonthly:"$7,583", period:"October 1987",
+      ytd:"$75,830"
+    },
+    employ: {
+      employer:"Columbia Tech Solutions",
+      position:"Senior Developer", salary:"$91,000 / year",
+      startDate:"August 2014", letterDate:"November 1987",
+      contact:"(503) 555-0455"
+    },
+    appraisal: {
+      address:"2180 River Road, Portland, OR",
+      value:"$330,000", appraiser:"Pacific Appraisal Co.",
+      date:"September 1987",
+      comps:"Avg: $310,000 - $350,000"
+    },
+    verdict:"approve",
+    explanation:"Clean application. All documents consistent.\nCredit: 725. DTI: ~25%. LTV: 75.8%. All within guidelines.",
+    wrongExplain:"Sarah Mitchell's application was clean.\nAll documents matched and figures were within guidelines.\nThis should have been APPROVED.",
+    flags:[]
+  },
+  // ──── DAY 3 ────
+  {
+    id:5, day:3, name:"Maria Gonzalez",
+    app: {
+      name:"Maria Gonzalez", ssn:"XXX-XX-6102",
+      income:"$78,000 / year", employer:"Portland General Electric",
+      since:"May 2013", loanAmt:"$195,000",
+      property:"455 Cedar Lane, Beaverton, OR", purpose:"Primary Residence"
+    },
+    credit: {
+      name:"Maria Gonzalez", ssn:"XXX-XX-6102",
+      score:755, monthlyDebt:"$550",
+      accounts:"4 open accounts, 0 delinquencies",
+      history:"14 years of credit history"
+    },
+    pay: {
+      employer:"Portland General Electric",
+      grossMonthly:"$6,500", period:"October 1987",
+      ytd:"$65,000"
+    },
+    employ: {
+      employer:"Portland General Electric",
+      position:"Electrical Engineer", salary:"$78,000 / year",
+      startDate:"May 2013", letterDate:"November 1987",
+      contact:"(503) 555-0578"
+    },
+    appraisal: {
+      address:"455 Cedar Lane, Beaverton, OR",
+      value:"$255,000", appraiser:"Pacific Appraisal Co.",
+      date:"October 1987",
+      comps:"Avg: $240,000 - $270,000"
+    },
+    verdict:"approve",
+    explanation:"Clean application. All documents consistent.\nCredit: 755. DTI: ~26.5%. LTV: 76.5%. All within guidelines.",
+    wrongExplain:"Maria Gonzalez had a clean application.\nAll documents matched and all figures met guidelines.\nShould have been APPROVED.",
+    flags:[]
+  },
+  {
+    id:6, day:3, name:"Thomas Blackwood",
+    app: {
+      name:"Thomas Blackwood", ssn:"XXX-XX-9947",
+      income:"$95,000 / year", employer:"Cascade Financial Group",
+      since:"March 2012", loanAmt:"$270,000",
+      property:"1580 Summit Dr, Lake Oswego, OR", purpose:"Primary Residence"
+    },
+    credit: {
+      name:"Thomas Blackwood", ssn:"XXX-XX-9947",
+      score:695, monthlyDebt:"$700",
+      accounts:"6 open accounts, 1 late payment",
+      history:"18 years of credit history"
+    },
+    pay: {
+      employer:"Cascade Financial Group",
+      grossMonthly:"$7,917", period:"October 1987",
+      ytd:"$79,170"
+    },
+    employ: {
+      employer:"Cascade Financial Group",
+      position:"Vice President", salary:"$95,000 / year",
+      startDate:"March 2012", letterDate:"November 1987",
+      contact:"(503) 555-0612"
+    },
+    appraisal: {
+      address:"1580 Summit Dr, Lake Oswego, OR",
+      value:"$350,000", appraiser:"Blackwood & Associates Appraisal",
+      date:"November 1987",
+      comps:"Avg: $170,000 - $195,000"
+    },
+    verdict:"deny",
+    isBossLoan: true,
+    explanation:"INFLATED APPRAISAL: The appraisal claims $350,000, but\ncomparables show $170K-$195K. The appraiser is\n'Blackwood & Associates' - same surname as the applicant!\nReal LTV: $270K/$185K = 145.9%. This is likely fraud.",
+    wrongExplain:"Thomas Blackwood's appraisal was wildly inflated.\nThe property was appraised at $350,000 but neighborhood\ncomparables were only $170K-$195K. The appraiser\n'Blackwood & Associates' shares the applicant's surname.\nShould have been DENIED or FLAGGED for fraud.",
+    flags:["INFLATED APPRAISAL","APPRAISER CONFLICT OF INTEREST"]
+  },
+  // ──── DAY 4 ────
+  {
+    id:7, day:4, name:"Kevin Brooks",
+    app: {
+      name:"Kevin Brooks", ssn:"XXX-XX-3318",
+      income:"$41,000 / year", employer:"Metro Transit Authority",
+      since:"April 2016", loanAmt:"$160,000",
+      property:"1580 Summit Dr, Lake Oswego, OR", purpose:"Primary Residence"
+    },
+    credit: {
+      name:"Kevin Brooks", ssn:"XXX-XX-3318",
+      score:590, monthlyDebt:"$300",
+      accounts:"3 open accounts, 4 late payments",
+      history:"5 years of credit history"
+    },
+    pay: {
+      employer:"Metro Transit Authority",
+      grossMonthly:"$3,417", period:"October 1987",
+      ytd:"$34,170"
+    },
+    employ: {
+      employer:"Metro Transit Authority",
+      position:"Bus Driver", salary:"$41,000 / year",
+      startDate:"April 2016", letterDate:"November 1987",
+      contact:"(503) 555-0734"
+    },
+    appraisal: {
+      address:"1580 Summit Dr, Lake Oswego, OR",
+      value:"$345,000", appraiser:"Blackwood & Associates Appraisal",
+      date:"November 1987",
+      comps:"Avg: $170,000 - $195,000"
+    },
+    verdict:"deny",
+    explanation:"CREDIT SCORE: 590, below the 620 minimum.\nAlso: SAME property address and SAME appraiser as\nThomas Blackwood's application from yesterday!\nThis property appears to be part of a fraud scheme.\nAppraisal is again vastly inflated.",
+    wrongExplain:"Kevin Brooks had a credit score of 590 (minimum is 620).\nThe same inflated property and appraiser from the\nBlackwood application appeared again. Should have been DENIED.",
+    flags:["LOW CREDIT SCORE","DUPLICATE PROPERTY","SAME FRAUDULENT APPRAISER"]
+  },
+  {
+    id:8, day:4, name:"Michael Chen",
+    app: {
+      name:"Michael Chen", ssn:"XXX-XX-4821",
+      income:"$84,000 / year", employer:"Chen Family Imports",
+      since:"February 2015", loanAmt:"$210,000",
+      property:"780 Birch Street, Tigard, OR", purpose:"Primary Residence"
+    },
+    credit: {
+      name:"Michael Chen", ssn:"XXX-XX-4821",
+      score:710, monthlyDebt:"$450",
+      accounts:"5 open accounts, 0 delinquencies",
+      history:"9 years of credit history"
+    },
+    pay: {
+      employer:"Chen Family Imports",
+      grossMonthly:"$7,000", period:"October 1987",
+      ytd:"$70,000"
+    },
+    employ: {
+      employer:"Chen Family Imports",
+      position:"Operations Manager", salary:"$84,000 / year",
+      startDate:"February 2015", letterDate:"November 1987",
+      contact:"(503) 555-0823"
+    },
+    appraisal: {
+      address:"780 Birch Street, Tigard, OR",
+      value:"$275,000", appraiser:"Pacific Appraisal Co.",
+      date:"October 1987",
+      comps:"Avg: $260,000 - $290,000"
+    },
+    verdict:"flag",
+    explanation:"SSN MATCH: Michael Chen's SSN (XXX-XX-4821) is\nIDENTICAL to Margaret Chen's from Day 1!\nTwo different people cannot have the same SSN.\nThis is potential identity theft. FLAG for investigation.",
+    wrongExplain:"Michael Chen used SSN XXX-XX-4821 - the SAME SSN\nas Margaret Chen from Day 1. This is identity theft\nand should have been FLAGGED for investigation.",
+    flags:["DUPLICATE SSN - IDENTITY THEFT"]
+  },
+  // ──── DAY 5 ────
+  {
+    id:9, day:5, name:"Helen Yamazaki",
+    app: {
+      name:"Helen Yamazaki", ssn:"XXX-XX-2256",
+      income:"$88,000 / year", employer:"Oregon Health & Science Univ.",
+      since:"June 2011", loanAmt:"$230,000",
+      property:"1960 Willow Court, Portland, OR", purpose:"Primary Residence"
+    },
+    credit: {
+      name:"Helen Yamazaki", ssn:"XXX-XX-2256",
+      score:730, monthlyDebt:"$620",
+      accounts:"3 open accounts, 0 delinquencies",
+      history:"16 years of credit history"
+    },
+    pay: {
+      employer:"Oregon Health & Science Univ.",
+      grossMonthly:"$7,333", period:"October 1987",
+      ytd:"$73,330"
+    },
+    employ: {
+      employer:"Oregon Health & Science Univ.",
+      position:"Research Director", salary:"$88,000 / year",
+      startDate:"June 2011", letterDate:"November 1987",
+      contact:"(503) 555-0901"
+    },
+    appraisal: {
+      address:"1960 Willow Court, Portland, OR",
+      value:"$295,000", appraiser:"Valley Appraisal Group",
+      date:"October 1987",
+      comps:"Avg: $280,000 - $310,000"
+    },
+    verdict:"approve",
+    explanation:"Clean application. All documents consistent.\nCredit: 730. DTI: ~27.3%. LTV: 78%. All within guidelines.",
+    wrongExplain:"Helen Yamazaki had a clean application.\nAll documents matched and figures met all guidelines.\nShould have been APPROVED.",
+    flags:[]
+  },
+  {
+    id:10, day:5, name:"Frank DeLuca",
+    app: {
+      name:"Frank DeLuca", ssn:"XXX-XX-1187",
+      income:"$120,000 / year", employer:"DeLuca Enterprises",
+      since:"January 2010", loanAmt:"$310,000",
+      property:"2400 Grand Blvd, Lake Oswego, OR", purpose:"Investment Property"
+    },
+    credit: {
+      name:"Frank DeLuca", ssn:"XXX-XX-1187",
+      score:580, monthlyDebt:"$1,800",
+      accounts:"9 open accounts, 5 late payments",
+      history:"7 years of credit history"
+    },
+    pay: {
+      employer:"DeLuca Enterprises",
+      grossMonthly:"$3,333", period:"October 1987",
+      ytd:"$33,330"
+    },
+    employ: {
+      employer:"DeLuca Enterprises",
+      position:"CEO", salary:"$120,000 / year",
+      startDate:"January 2010", letterDate:"November 1987",
+      contact:"(503) 555-0199"
+    },
+    appraisal: {
+      address:"2400 Grand Blvd, Lake Oswego, OR",
+      value:"$400,000", appraiser:"Blackwood & Associates Appraisal",
+      date:"November 1987",
+      comps:"Avg: $280,000 - $320,000"
+    },
+    verdict:"flag",
+    explanation:"MULTIPLE RED FLAGS:\n1) Credit score 580 (below 620 minimum)\n2) Income: App says $120K but stubs show $3,333/mo ($40K)\n3) Appraiser is 'Blackwood & Associates' AGAIN\n4) Appraisal inflated ($400K vs comps of $280K-$320K)\n5) 5 late payments on credit report\nThis applicant appears connected to the fraud ring.",
+    wrongExplain:"Frank DeLuca had MULTIPLE disqualifying issues:\nCredit 580 (min 620), income claimed $120K but stubs\nshow only $40K/yr, and the same fraudulent appraiser\nfrom the Blackwood scheme. Should have been FLAGGED.",
+    flags:["LOW CREDIT","INCOME MISMATCH","FRAUDULENT APPRAISER","INFLATED APPRAISAL"]
+  }
+];
+
+// ═══════════════════════════════════════════════════════════════
+// STORY DIALOGS
+// ═══════════════════════════════════════════════════════════════
+const STORY = {
+  day1_start: [
+    {s:"Griggs", t:"Welcome to First Federal Savings Bank, kid."},
+    {s:"Griggs", t:"I'm Harold Griggs, Senior Loan Manager. You report to me."},
+    {s:"Griggs", t:"Your job is simple: review mortgage applications, decide whether to APPROVE or DENY each one."},
+    {s:"Griggs", t:"Follow the lending guidelines on your desk. Don't overthink it."},
+    {s:"Griggs", t:"If you suspect fraud, you can FLAG an application for investigation."},
+    {s:null, t:"Mr. Griggs drops a stack of files on your desk and walks away."},
+    {s:null, t:"Type HELP for commands, or RULES to see the lending guidelines."},
+  ],
+  day2_start: [
+    {s:null, t:"The morning paper sits on the break room table:\n'PORTLAND TRIBUNE - HOUSING MARKET BOOMS,\nLENDERS RUSH TO MEET DEMAND'"},
+    {s:"Griggs", t:"Morning. We've had some fraud attempts at other branches lately."},
+    {s:"Griggs", t:"Read every document carefully. Cross-reference the details."},
+    {s:"Griggs", t:"If something doesn't add up between the application and the supporting documents, that's a problem."},
+    {s:null, t:"Two new application files appear on your desk."},
+  ],
+  day3_start: [
+    {s:null, t:"Today's headline: 'SAVINGS & LOAN CRISIS DEEPENS -\nREGULATORS WARN OF LOOSE LENDING PRACTICES'"},
+    {s:"Griggs", t:"Listen, before you get started today..."},
+    {s:"Griggs", t:"A friend of mine is applying for a loan. Thomas Blackwood. Good man. Solid borrower."},
+    {s:"Griggs", t:"I'd consider it a personal favor if you made sure his application goes through."},
+    {s:"Griggs", t:"We're all on the same team here, right?"},
+    {s:null, t:"Griggs gives you a long look before returning to his office."},
+    {s:null, t:"Today's applications are on your desk."},
+  ],
+  day4_start: [
+    {s:null, t:"You arrive to find a note on your desk from Compliance:"},
+    {s:null, t:"'MEMO: Federal regulators have flagged suspicious appraisal\npatterns in the Portland metro area. Exercise heightened\nscrutiny on all property valuations. Report any patterns\nyou observe to the compliance department immediately.'"},
+    {s:null, t:"There's a second memo stapled to the first:"},
+    {s:null, t:"'REMINDER: Cross-reference all applicant data against\nprevious files. Check SSNs, addresses, and appraiser names\nfor duplicates. Use your NOTES to review previous applicants.'"},
+    {s:null, t:"Today's applications are waiting."},
+  ],
+  day5_start: [
+    {s:null, t:"The paper reads: 'FBI PROBES PORTLAND AREA BANKS -\nMORTGAGE FRAUD RING SUSPECTED IN MULTIPLE COUNTIES'"},
+    {s:null, t:"Your stomach drops. You take a deep breath and sit down."},
+    {s:"Agent Walsh", t:"Good morning. I'm Special Agent Walsh, FBI Financial Crimes Division."},
+    {s:"Agent Walsh", t:"We're investigating a mortgage fraud ring operating through several banks in this area."},
+    {s:"Agent Walsh", t:"Your records are part of our review. Every decision you've made is being examined."},
+    {s:"Agent Walsh", t:"Continue your work today as normal. We'll be in touch."},
+    {s:null, t:"Agent Walsh leaves. Your hands are shaking slightly."},
+    {s:null, t:"Two final applications sit on your desk."},
+  ],
+  day3_denied_blackwood: [
+    {s:"Griggs", t:"What the HELL do you think you're doing?!"},
+    {s:"Griggs", t:"I asked you for ONE favor. Tom Blackwood is a respected member of this community!"},
+    {s:"Griggs", t:"You'd better hope you know what you're doing, kid. I won't forget this."},
+    {s:null, t:"Griggs storms back to his office, slamming the door."},
+  ],
+  day3_approved_blackwood: [
+    {s:"Griggs", t:"Good work today. I knew you were a team player."},
+    {s:"Griggs", t:"Tom will be very happy. And when Tom's happy, good things happen around here."},
+    {s:null, t:"Griggs pats you on the shoulder and walks away, whistling."},
+  ],
+  day3_flagged_blackwood: [
+    {s:"Griggs", t:"You... FLAGGED his application?! For FRAUD?!"},
+    {s:"Griggs", t:"Do you have any idea what you've done? That man is my FRIEND!"},
+    {s:"Griggs", t:"You're making a very serious mistake. A career-ending mistake."},
+    {s:null, t:"Griggs' face is red. He storms out without another word."},
+  ],
+};
+
+// ═══════════════════════════════════════════════════════════════
+// LENDING RULES
+// ═══════════════════════════════════════════════════════════════
+const RULES_TEXT = `
+╔══════════════════════════════════════════════════════════╗
+║   FIRST FEDERAL SAVINGS BANK - LENDING GUIDELINES       ║
+╠══════════════════════════════════════════════════════════╣
+║                                                          ║
+║  1. CREDIT SCORE: Minimum 620                            ║
+║                                                          ║
+║  2. DEBT-TO-INCOME RATIO (DTI): Maximum 43%              ║
+║     DTI = (Monthly Debts + Est. Mortgage) / Monthly Inc  ║
+║     Est. Monthly Mortgage = Loan Amount x 0.006          ║
+║                                                          ║
+║  3. LOAN-TO-VALUE RATIO (LTV): Maximum 80%               ║
+║     LTV = Loan Amount / Appraised Property Value         ║
+║                                                          ║
+║  4. EMPLOYMENT: Minimum 2 years with current employer    ║
+║                                                          ║
+║  5. CONSISTENCY: All documents must agree on names,      ║
+║     SSNs, employers, income, and dates                   ║
+║                                                          ║
+║  6. APPRAISALS: Must reflect fair market value based     ║
+║     on comparable sales in the neighborhood              ║
+║                                                          ║
+╚══════════════════════════════════════════════════════════╝`;
+
+// ═══════════════════════════════════════════════════════════════
+// GAME STATE
+// ═══════════════════════════════════════════════════════════════
+const state = {
+  screen: 'title',   // title, dialog, desk, day_end, ending
+  day: 1,
+  appIndex: 0,       // index within current day's applicants
+  dialogQueue: [],
+  dialogSpeaker: null,
+  decisions: [],     // {id, name, playerChoice, correctChoice, correct}
+  docsOpened: new Set(),
+  confirmPending: null,
+  blackwoodChoice: null,  // 'approve','deny','flag'
+  totalCorrect: 0,
+  totalDecisions: 0,
+  flagsCaught: 0,
+  fraudsMissed: 0,
+  dayApplicants: [],
+  previousSSNs: {},   // track SSNs seen: ssn -> name
+  gameStarted: false,
+  endingType: null,
+  currentApplicant: null,
+  madeDecision: false,
+};
+
+function getDayApplicants(day) {
+  return APPLICANTS.filter(a => a.day === day);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// TEXT OUTPUT
+// ═══════════════════════════════════════════════════════════════
+const output = document.getElementById('output');
+const input = document.getElementById('input');
+
+function addText(str, color=EGA.LGRAY) {
+  const d = document.createElement('div');
+  d.style.color = color;
+  d.textContent = str;
+  output.appendChild(d);
+  output.scrollTop = output.scrollHeight;
+}
+function addHTML(str, color=EGA.LGRAY) {
+  const d = document.createElement('div');
+  d.style.color = color;
+  d.innerHTML = str;
+  output.appendChild(d);
+  output.scrollTop = output.scrollHeight;
+}
+function addSpacer() { addText(''); }
+function clearOutput() { output.innerHTML = ''; }
+
+function updateStatus() {
+  const sbDay = document.getElementById('sb-day');
+  const sbInfo = document.getElementById('sb-info');
+  const sbScore = document.getElementById('sb-score');
+  sbDay.textContent = state.screen === 'title' ? '' : 'DAY ' + state.day;
+  sbInfo.textContent = 'FIRST FEDERAL SAVINGS BANK';
+  if (state.totalDecisions > 0) {
+    const pct = Math.round((state.totalCorrect / state.totalDecisions) * 100);
+    sbScore.textContent = 'RATING: ' + pct + '%';
+  } else {
+    sbScore.textContent = 'RATING: --';
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// DOCUMENT FORMATTING
+// ═══════════════════════════════════════════════════════════════
+function formatApplication(a) {
+  return `╔═══════════════════════════════════════════════════╗
+║           MORTGAGE LOAN APPLICATION               ║
+╠═══════════════════════════════════════════════════╣
+║  Applicant:    ${pad(a.app.name,34)}║
+║  SSN:          ${pad(a.app.ssn,34)}║
+║  Annual Income:${pad(a.app.income,34)}║
+║  Employer:     ${pad(a.app.employer,34)}║
+║  Employed Since:${pad(a.app.since,33)}║
+║  Loan Amount:  ${pad(a.app.loanAmt,34)}║
+║  Property:     ${pad(a.app.property,34)}║
+║  Purpose:      ${pad(a.app.purpose,34)}║
+╚═══════════════════════════════════════════════════╝`;
+}
+function formatCredit(a) {
+  return `╔═══════════════════════════════════════════════════╗
+║              CREDIT BUREAU REPORT                 ║
+╠═══════════════════════════════════════════════════╣
+║  Name:          ${pad(a.credit.name,33)}║
+║  SSN:           ${pad(a.credit.ssn,33)}║
+║  Credit Score:  ${pad(String(a.credit.score),33)}║
+║  Monthly Debts: ${pad(a.credit.monthlyDebt,33)}║
+║  Accounts:      ${pad(a.credit.accounts,33)}║
+║  History:       ${pad(a.credit.history,33)}║
+╚═══════════════════════════════════════════════════╝`;
+}
+function formatPayStubs(a) {
+  return `╔═══════════════════════════════════════════════════╗
+║                  PAY STUB                         ║
+╠═══════════════════════════════════════════════════╣
+║  Employer:       ${pad(a.pay.employer,32)}║
+║  Gross Monthly:  ${pad(a.pay.grossMonthly,32)}║
+║  Pay Period:     ${pad(a.pay.period,32)}║
+║  Year-to-Date:   ${pad(a.pay.ytd,32)}║
+╚═══════════════════════════════════════════════════╝`;
+}
+function formatEmployment(a) {
+  return `╔═══════════════════════════════════════════════════╗
+║          EMPLOYMENT VERIFICATION LETTER           ║
+╠═══════════════════════════════════════════════════╣
+║  Employer:      ${pad(a.employ.employer,33)}║
+║  Position:      ${pad(a.employ.position,33)}║
+║  Salary:        ${pad(a.employ.salary,33)}║
+║  Start Date:    ${pad(a.employ.startDate,33)}║
+║  Letter Date:   ${pad(a.employ.letterDate,33)}║
+║  Contact Phone: ${pad(a.employ.contact,33)}║
+╚═══════════════════════════════════════════════════╝`;
+}
+function formatAppraisal(a) {
+  return `╔═══════════════════════════════════════════════════╗
+║             PROPERTY APPRAISAL REPORT             ║
+╠═══════════════════════════════════════════════════╣
+║  Address:     ${pad(a.appraisal.address,35)}║
+║  Appraised:   ${pad(a.appraisal.value,35)}║
+║  Appraiser:   ${pad(a.appraisal.appraiser,35)}║
+║  Date:        ${pad(a.appraisal.date,35)}║
+║  Comparables: ${pad(a.appraisal.comps,35)}║
+╚═══════════════════════════════════════════════════╝`;
+}
+function pad(str, len) {
+  if (str.length >= len) return str.substring(0, len);
+  return str + ' '.repeat(len - str.length);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// DIALOG SYSTEM
+// ═══════════════════════════════════════════════════════════════
+function startDialog(key, callback) {
+  const dlg = STORY[key];
+  if (!dlg) { if(callback) callback(); return; }
+  state.screen = 'dialog';
+  state.dialogQueue = [...dlg];
+  state.dialogCallback = callback || null;
+  clearOutput();
+  advanceDialog();
+}
+
+function advanceDialog() {
+  if (state.dialogQueue.length === 0) {
+    state.screen = 'desk';
+    if (state.dialogCallback) state.dialogCallback();
+    return;
+  }
+  const line = state.dialogQueue.shift();
+  if (line.s) {
+    state.dialogSpeaker = line.s;
+    drawDialog(line.s);
+    addText(line.s + ':', EGA.YELLOW);
+    addText('  "' + line.t + '"', EGA.WHITE);
+  } else {
+    drawOffice();
+    addText(line.t, EGA.LCYAN);
+  }
+  addSpacer();
+  if (state.dialogQueue.length > 0) {
+    addText('[Press ENTER to continue]', EGA.DGRAY);
+  } else {
+    addText('[Press ENTER to continue]', EGA.DGRAY);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CHECK / CALCULATE FUNCTIONS
+// ═══════════════════════════════════════════════════════════════
+function parseNum(s) {
+  return parseFloat(s.replace(/[^0-9.]/g, ''));
+}
+
+function runChecks(a) {
+  addText('═══ AUTOMATED GUIDELINE CHECK ═══', EGA.YELLOW);
+  addSpacer();
+
+  // Credit Score
+  const credit = a.credit.score;
+  const creditOk = credit >= 620;
+  addText('Credit Score: ' + credit + (creditOk ? ' [PASS - min 620]' : ' [FAIL - below 620]'),
+    creditOk ? EGA.LGREEN : EGA.LRED);
+
+  // DTI
+  const monthlyIncome = parseNum(a.pay.grossMonthly);
+  const monthlyDebt = parseNum(a.credit.monthlyDebt);
+  const loanAmt = parseNum(a.app.loanAmt);
+  const estMortgage = loanAmt * 0.006;
+  const dti = ((monthlyDebt + estMortgage) / monthlyIncome * 100);
+  const dtiOk = dti <= 43;
+  addText('DTI: (' + a.credit.monthlyDebt + ' + $' + Math.round(estMortgage).toLocaleString() + ' est.mortgage) / ' + a.pay.grossMonthly, EGA.LGRAY);
+  addText('     = ' + dti.toFixed(1) + '%' + (dtiOk ? ' [PASS - max 43%]' : ' [FAIL - exceeds 43%]'),
+    dtiOk ? EGA.LGREEN : EGA.LRED);
+
+  // LTV
+  const appraised = parseNum(a.appraisal.value);
+  const ltv = (loanAmt / appraised * 100);
+  const ltvOk = ltv <= 80;
+  addText('LTV: ' + a.app.loanAmt + ' / ' + a.appraisal.value + ' = ' + ltv.toFixed(1) + '%' +
+    (ltvOk ? ' [PASS - max 80%]' : ' [FAIL - exceeds 80%]'),
+    ltvOk ? EGA.LGREEN : EGA.LRED);
+
+  // Employment duration (simple check)
+  // Income comparison
+  const appIncome = parseNum(a.app.income);
+  const stubAnnual = monthlyIncome * 12;
+  const incomeMatch = Math.abs(appIncome - stubAnnual) < 1000;
+  addText('Income (Application): $' + appIncome.toLocaleString() + '/yr', EGA.LGRAY);
+  addText('Income (Pay Stubs):   $' + stubAnnual.toLocaleString() + '/yr' +
+    (incomeMatch ? ' [MATCH]' : ' [MISMATCH!]'),
+    incomeMatch ? EGA.LGREEN : EGA.LRED);
+
+  addText('Employment Since: ' + a.app.since, EGA.LGRAY);
+  addSpacer();
+  addText('NOTE: DTI calculated using PAY STUB income, not application.', EGA.DGRAY);
+  addText('Cross-reference ALL documents for name, SSN, and employer', EGA.DGRAY);
+  addText('discrepancies. Type NOTES to check previous applicant SSNs.', EGA.DGRAY);
+  addSpacer();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// GAME FLOW
+// ═══════════════════════════════════════════════════════════════
+function startGame() {
+  initAudio();
+  state.gameStarted = true;
+  state.day = 1;
+  state.decisions = [];
+  state.totalCorrect = 0;
+  state.totalDecisions = 0;
+  state.flagsCaught = 0;
+  state.fraudsMissed = 0;
+  state.previousSSNs = {};
+  state.blackwoodChoice = null;
+  clearOutput();
+  addText('═══════════════════════════════════════════════════', EGA.BLUE);
+  addText('            LOAN QUEST: THE UNDERWRITER\'S BURDEN', EGA.YELLOW);
+  addText('═══════════════════════════════════════════════════', EGA.BLUE);
+  addSpacer();
+  addText('The year is 1987.', EGA.LGRAY);
+  addSpacer();
+  addText('After six months of unemployment, you\'ve finally landed', EGA.LGRAY);
+  addText('a job as Credit Analyst at First Federal Savings Bank.', EGA.LGRAY);
+  addText('Your wife and two kids are counting on you.', EGA.LGRAY);
+  addSpacer();
+  addText('Your job: review mortgage loan applications and decide', EGA.WHITE);
+  addText('whether to APPROVE, DENY, or FLAG each one.', EGA.WHITE);
+  addSpacer();
+  addText('Every bad loan you approve puts the bank at risk.', EGA.LRED);
+  addText('Every good loan you deny is a dream denied.', EGA.LCYAN);
+  addSpacer();
+  addText('Choose wisely.', EGA.YELLOW);
+  addSpacer();
+  addText('[Press ENTER to begin Day 1]', EGA.DGRAY);
+  state.screen = 'intro';
+  sfxNewDay();
+  updateStatus();
+}
+
+function startDay(dayNum) {
+  state.day = dayNum;
+  state.dayApplicants = getDayApplicants(dayNum);
+  state.appIndex = 0;
+  state.madeDecision = false;
+  clearOutput();
+  sfxNewDay();
+
+  const key = 'day' + dayNum + '_start';
+  startDialog(key, () => {
+    loadApplicant();
+  });
+  updateStatus();
+}
+
+function loadApplicant() {
+  if (state.appIndex >= state.dayApplicants.length) {
+    endDay();
+    return;
+  }
+  state.currentApplicant = state.dayApplicants[state.appIndex];
+  state.docsOpened = new Set();
+  state.madeDecision = false;
+  state.confirmPending = null;
+  state.screen = 'desk';
+  drawOffice();
+  clearOutput();
+  addText('═══════════════════════════════════════════════════', EGA.BLUE);
+  addText('  APPLICANT: ' + state.currentApplicant.name, EGA.YELLOW);
+  addText('═══════════════════════════════════════════════════', EGA.BLUE);
+  addSpacer();
+  addText('A new application folder has been placed on your desk.', EGA.LGRAY);
+  addText('Documents available:', EGA.LGRAY);
+  addText('  APPLICATION  - Borrower\'s loan application form', EGA.WHITE);
+  addText('  CREDIT       - Credit bureau report', EGA.WHITE);
+  addText('  PAYSTUBS     - Recent pay stub', EGA.WHITE);
+  addText('  EMPLOYMENT   - Employer verification letter', EGA.WHITE);
+  addText('  APPRAISAL    - Property appraisal report', EGA.WHITE);
+  addSpacer();
+  addText('Type OPEN [document] to read. Type HELP for all commands.', EGA.DGRAY);
+
+  if (state.currentApplicant.isBossLoan) {
+    addSpacer();
+    addText('* You recall that Mr. Griggs asked you to approve', EGA.LRED);
+    addText('  Thomas Blackwood\'s application...', EGA.LRED);
+  }
+  updateStatus();
+}
+
+function makeDecision(choice) {
+  if (state.madeDecision) {
+    addText('You already made a decision on this application.', EGA.LRED);
+    return;
+  }
+  if (state.docsOpened.size < 3) {
+    addText('You\'ve only reviewed ' + state.docsOpened.size + ' document(s).', EGA.YELLOW);
+    addText('Are you sure? Type your decision again to confirm,', EGA.YELLOW);
+    addText('or OPEN more documents first.', EGA.YELLOW);
+    if (!state.confirmPending) {
+      state.confirmPending = choice;
+      return;
+    } else if (state.confirmPending !== choice) {
+      state.confirmPending = choice;
+      return;
+    }
+  }
+  state.confirmPending = null;
+  const a = state.currentApplicant;
+  state.madeDecision = true;
+  state.totalDecisions++;
+
+  const correct = (choice === a.verdict) ||
+    (choice === 'deny' && a.verdict === 'flag') ||
+    (choice === 'flag' && a.verdict === 'deny');
+  // More precise: flag when should flag is best, deny when should flag is partial
+  let isFullyCorrect = (choice === a.verdict);
+  let isPartialCorrect = !isFullyCorrect && (
+    (choice === 'deny' && a.verdict === 'flag') ||
+    (choice === 'flag' && a.verdict === 'deny')
+  );
+
+  if (isFullyCorrect || isPartialCorrect) {
+    state.totalCorrect++;
+  }
+  if (choice === 'flag' && (a.verdict === 'flag' || a.verdict === 'deny') && a.flags.length > 0) {
+    state.flagsCaught++;
+  }
+  if (choice === 'approve' && a.verdict !== 'approve') {
+    state.fraudsMissed++;
+  }
+
+  // Track SSNs
+  state.previousSSNs[a.app.ssn] = a.app.name;
+
+  // Track Blackwood choice
+  if (a.name === 'Thomas Blackwood') {
+    state.blackwoodChoice = choice;
+  }
+
+  state.decisions.push({
+    id: a.id, name: a.name,
+    playerChoice: choice,
+    correctChoice: a.verdict,
+    correct: isFullyCorrect || isPartialCorrect,
+    fullyCorrect: isFullyCorrect
+  });
+
+  // Feedback
+  addSpacer();
+  if (choice === 'approve') {
+    addText('══ APPLICATION APPROVED ══', EGA.LGREEN);
+    sfxApprove();
+  } else if (choice === 'deny') {
+    addText('══ APPLICATION DENIED ══', EGA.LRED);
+    sfxDeny();
+  } else {
+    addText('══ APPLICATION FLAGGED FOR INVESTIGATION ══', EGA.YELLOW);
+    sfxFlag();
+  }
+  addText('Decision filed for ' + a.name + '.', EGA.LGRAY);
+  addSpacer();
+
+  // Day 1 gives immediate feedback (tutorial)
+  if (state.day === 1) {
+    if (isFullyCorrect) {
+      addText('Correct decision.', EGA.LGREEN);
+      addText(a.explanation, EGA.LGRAY);
+    } else if (isPartialCorrect) {
+      addText('Acceptable, but not optimal.', EGA.YELLOW);
+      addText(a.explanation, EGA.LGRAY);
+    } else {
+      addText('Incorrect decision!', EGA.LRED);
+      addText(a.wrongExplain, EGA.LGRAY);
+      sfxError();
+    }
+    addSpacer();
+  }
+
+  // Special dialog for Blackwood
+  if (a.name === 'Thomas Blackwood') {
+    if (choice === 'deny') {
+      addText('[Press ENTER to continue]', EGA.DGRAY);
+      state.screen = 'blackwood_react';
+      state.blackwoodReactKey = 'day3_denied_blackwood';
+      return;
+    } else if (choice === 'approve') {
+      addText('[Press ENTER to continue]', EGA.DGRAY);
+      state.screen = 'blackwood_react';
+      state.blackwoodReactKey = 'day3_approved_blackwood';
+      return;
+    } else if (choice === 'flag') {
+      addText('[Press ENTER to continue]', EGA.DGRAY);
+      state.screen = 'blackwood_react';
+      state.blackwoodReactKey = 'day3_flagged_blackwood';
+      return;
+    }
+  }
+
+  addText('[Press ENTER for next applicant]', EGA.DGRAY);
+  state.screen = 'next_app';
+}
+
+function nextApplicant() {
+  state.appIndex++;
+  if (state.appIndex >= state.dayApplicants.length) {
+    endDay();
+  } else {
+    loadApplicant();
+  }
+}
+
+function endDay() {
+  state.screen = 'day_end';
+  drawDayEnd(state.day);
+  clearOutput();
+  addText('═══════════════════════════════════════════════════', EGA.YELLOW);
+  addText('            END OF DAY ' + state.day, EGA.YELLOW);
+  addText('═══════════════════════════════════════════════════', EGA.YELLOW);
+  addSpacer();
+
+  // Show today's decisions
+  const todayDecisions = state.decisions.filter(d => {
+    const app = APPLICANTS.find(a => a.id === d.id);
+    return app && app.day === state.day;
+  });
+
+  addText('Today\'s Decisions:', EGA.WHITE);
+  addSpacer();
+  todayDecisions.forEach(d => {
+    const icon = d.correct ? '[OK]' : '[!!]';
+    const color = d.correct ? EGA.LGREEN : EGA.LRED;
+    const app = APPLICANTS.find(a => a.id === d.id);
+    addText('  ' + icon + ' ' + d.name, color);
+    addText('       You: ' + d.playerChoice.toUpperCase() + '  |  Correct: ' + d.correctChoice.toUpperCase(), color);
+    if (!d.correct && state.day > 1) {
+      addText('       ' + app.wrongExplain.split('\n')[0], EGA.LRED);
+    }
+  });
+  addSpacer();
+
+  const pct = Math.round((state.totalCorrect / state.totalDecisions) * 100);
+  addText('Overall Accuracy: ' + state.totalCorrect + '/' + state.totalDecisions + ' (' + pct + '%)', EGA.YELLOW);
+  addSpacer();
+
+  // Narrative beats
+  if (state.day === 1) {
+    if (pct >= 100) {
+      addText('Not bad for your first day. Maybe you\'ll work out after all.', EGA.LGRAY);
+    } else {
+      addText('A rough start. Review the RULES more carefully tomorrow.', EGA.LGRAY);
+    }
+  } else if (state.day === 2) {
+    if (pct >= 75) {
+      addText('You\'re developing a good eye for details. Keep it up.', EGA.LGRAY);
+    } else {
+      addText('You missed some red flags today. Stay sharp.', EGA.LGRAY);
+    }
+  } else if (state.day === 3) {
+    addText('The tension in the office is palpable tonight.', EGA.LGRAY);
+  } else if (state.day === 4) {
+    addText('The FBI investigation weighs heavily on your mind.', EGA.LGRAY);
+    if (state.flagsCaught > 0) {
+      addText('At least you flagged some suspicious applications.', EGA.LGREEN);
+    }
+  }
+
+  addSpacer();
+  if (state.day < 5) {
+    addText('[Press ENTER to continue to Day ' + (state.day + 1) + ']', EGA.DGRAY);
+  } else {
+    addText('[Press ENTER to see your final evaluation]', EGA.DGRAY);
+  }
+  updateStatus();
+}
+
+function showEnding() {
+  state.screen = 'ending';
+  clearOutput();
+
+  const pct = Math.round((state.totalCorrect / state.totalDecisions) * 100);
+  const deniedBlackwood = state.blackwoodChoice === 'deny' || state.blackwoodChoice === 'flag';
+  const flaggedBlackwood = state.blackwoodChoice === 'flag';
+
+  let endType;
+  if (pct >= 90 && deniedBlackwood) {
+    endType = 'perfect';
+  } else if (pct >= 70) {
+    endType = 'good';
+  } else if (pct >= 50) {
+    endType = 'mediocre';
+  } else {
+    endType = 'bad';
+  }
+  state.endingType = endType;
+  drawEnding(endType);
+
+  addText('═══════════════════════════════════════════════════', EGA.YELLOW);
+  addText('              FINAL EVALUATION', EGA.YELLOW);
+  addText('═══════════════════════════════════════════════════', EGA.YELLOW);
+  addSpacer();
+
+  // Performance summary
+  addText('PERFORMANCE SUMMARY:', EGA.WHITE);
+  addText('  Applications Reviewed: ' + state.totalDecisions, EGA.LGRAY);
+  addText('  Correct Decisions:     ' + state.totalCorrect + '/' + state.totalDecisions + ' (' + pct + '%)', EGA.LGRAY);
+  addText('  Fraud Cases Caught:    ' + state.flagsCaught, EGA.LGRAY);
+  addText('  Bad Approvals:         ' + state.fraudsMissed, state.fraudsMissed > 0 ? EGA.LRED : EGA.LGREEN);
+  addSpacer();
+
+  // Decision review
+  addText('ALL DECISIONS:', EGA.WHITE);
+  state.decisions.forEach(d => {
+    const icon = d.correct ? '+' : 'X';
+    const color = d.correct ? EGA.LGREEN : EGA.LRED;
+    addText('  [' + icon + '] ' + pad(d.name, 22) + d.playerChoice.toUpperCase().padEnd(10) + '(should: ' + d.correctChoice.toUpperCase() + ')', color);
+  });
+  addSpacer();
+
+  // Narrative ending
+  addText('── THE AFTERMATH ──', EGA.YELLOW);
+  addSpacer();
+
+  if (endType === 'perfect') {
+    addText('Agent Walsh returns to your desk at the end of the week.', EGA.LGRAY);
+    addSpacer();
+    addText('"Impressive work. Your records are impeccable."', EGA.WHITE);
+    addSpacer();
+    if (flaggedBlackwood) {
+      addText('"That Blackwood flag was the thread that unraveled the', EGA.WHITE);
+      addText(' whole operation. We\'ve made three arrests so far."', EGA.WHITE);
+      addSpacer();
+      addText('Harold Griggs is escorted from the building in handcuffs.', EGA.LCYAN);
+      addText('He doesn\'t look at you as he passes your desk.', EGA.LCYAN);
+      addSpacer();
+    }
+    addText('Three months later, you\'re promoted to Senior Credit', EGA.LGRAY);
+    addText('Analyst. The new branch manager thanks you personally', EGA.LGRAY);
+    addText('for protecting the bank during the fraud investigation.', EGA.LGRAY);
+    addSpacer();
+    addText('Your family sleeps a little easier now.', EGA.LGREEN);
+    addSpacer();
+    addText('You did the right thing. Even when it was hard.', EGA.YELLOW);
+    addText('Especially when it was hard.', EGA.YELLOW);
+
+  } else if (endType === 'good') {
+    addText('The FBI investigation concludes. Your record is', EGA.LGRAY);
+    addText('mostly clean, with a few questionable decisions.', EGA.LGRAY);
+    addSpacer();
+    if (!deniedBlackwood) {
+      addText('The Blackwood loan comes back to haunt the bank.', EGA.LRED);
+      addText('Griggs claims he had nothing to do with it. Your', EGA.LGRAY);
+      addText('signature is on the approval. You get a formal warning.', EGA.LGRAY);
+      addSpacer();
+    }
+    addText('You keep your job. The bank weathers the storm.', EGA.LGRAY);
+    addText('It\'s not a fairy tale ending, but it\'s enough.', EGA.LGRAY);
+    addSpacer();
+    addText('Your family is safe. That\'s what matters.', EGA.LGREEN);
+
+  } else if (endType === 'mediocre') {
+    addText('The investigation reveals several bad loans that', EGA.LGRAY);
+    addText('slipped through your desk. The bank takes losses.', EGA.LGRAY);
+    addSpacer();
+    addText('You receive a formal reprimand and are placed on', EGA.LGRAY);
+    addText('a performance improvement plan. Your job hangs by', EGA.LGRAY);
+    addText('a thread.', EGA.LGRAY);
+    addSpacer();
+    if (!deniedBlackwood) {
+      addText('The Blackwood approval is flagged by auditors.', EGA.LRED);
+      addText('You\'re questioned extensively about your decision.', EGA.LGRAY);
+      addSpacer();
+    }
+    addText('You spend the holidays wondering if there will be', EGA.LGRAY);
+    addText('a paycheck in January.', EGA.LGRAY);
+    addSpacer();
+    addText('Sometimes good enough... isn\'t.', EGA.YELLOW);
+
+  } else {
+    addText('The FBI investigation is damning. Multiple fraudulent', EGA.LGRAY);
+    addText('loans bear your approval stamp. The bank suffers', EGA.LGRAY);
+    addText('catastrophic losses.', EGA.LGRAY);
+    addSpacer();
+    addText('You are terminated effective immediately.', EGA.LRED);
+    addText('Your banking license is revoked pending investigation.', EGA.LRED);
+    addSpacer();
+    if (!deniedBlackwood) {
+      addText('The Blackwood loan default alone costs the bank', EGA.LRED);
+      addText('$270,000. Griggs denies ever pressuring you.', EGA.LRED);
+      addSpacer();
+    }
+    addText('You drive home in silence, rehearsing what you\'ll', EGA.LGRAY);
+    addText('tell your wife. The kids are expecting presents', EGA.LGRAY);
+    addText('this Christmas.', EGA.LGRAY);
+    addSpacer();
+    addText('The road to ruin is paved with rubber stamps.', EGA.YELLOW);
+  }
+
+  addSpacer();
+  addText('═══════════════════════════════════════════════════', EGA.BLUE);
+  addText('  LOAN QUEST: THE UNDERWRITER\'S BURDEN', EGA.YELLOW);
+  addText('  A Sierra-style adventure    (c) 1987', EGA.DGRAY);
+  addText('═══════════════════════════════════════════════════', EGA.BLUE);
+  addSpacer();
+  addText('  Final Score: ' + pct + '% - ' + endType.toUpperCase() + ' ENDING', EGA.YELLOW);
+  addSpacer();
+  addText('Type RESTART to play again.', EGA.DGRAY);
+  updateStatus();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// COMMAND PARSER
+// ═══════════════════════════════════════════════════════════════
+function processCommand(raw) {
+  const cmd = raw.trim().toUpperCase();
+  if (!cmd) {
+    // Empty enter - handle based on screen state
+    handleEnter();
+    return;
+  }
+
+  if (cmd === 'RESTART') {
+    state.screen = 'title';
+    clearOutput();
+    drawTitle();
+    state.gameStarted = false;
+    state.decisions = [];
+    state.totalCorrect = 0;
+    state.totalDecisions = 0;
+    state.flagsCaught = 0;
+    state.fraudsMissed = 0;
+    state.previousSSNs = {};
+    state.blackwoodChoice = null;
+    addText('LOAN QUEST: THE UNDERWRITER\'S BURDEN', EGA.YELLOW);
+    addText('Press ENTER to begin.', EGA.LGRAY);
+    updateStatus();
+    return;
+  }
+
+  // Handle different screen states - any input acts as ENTER
+  if (['title','intro','dialog','day_end','next_app','blackwood_react'].includes(state.screen)) {
+    handleEnter();
+    return;
+  }
+
+  if (state.screen === 'ending') {
+    return;
+  }
+
+  // Main desk commands
+  if (state.screen !== 'desk') return;
+
+  const parts = cmd.split(/\s+/);
+  const verb = parts[0];
+  const obj = parts.slice(1).join(' ');
+
+  switch(verb) {
+    case 'HELP':
+    case '?':
+      showHelp();
+      break;
+    case 'RULES':
+    case 'GUIDELINES':
+      addText(RULES_TEXT, EGA.WHITE);
+      break;
+    case 'LOOK':
+    case 'EXAMINE':
+    case 'L':
+      if (!obj) {
+        lookAround();
+      } else {
+        openDoc(obj);
+      }
+      break;
+    case 'OPEN':
+    case 'READ':
+    case 'VIEW':
+      if (obj) openDoc(obj);
+      else addText('Open what? (APPLICATION, CREDIT, PAYSTUBS, EMPLOYMENT, APPRAISAL)', EGA.LGRAY);
+      break;
+    case 'CHECK':
+    case 'CALCULATE':
+    case 'CALC':
+      if (state.currentApplicant) runChecks(state.currentApplicant);
+      else addText('No application to check.', EGA.LGRAY);
+      break;
+    case 'APPROVE':
+    case 'APPROVED':
+    case 'YES':
+    case 'ACCEPT':
+      if (state.currentApplicant) makeDecision('approve');
+      else addText('No application to approve.', EGA.LGRAY);
+      break;
+    case 'DENY':
+    case 'DENIED':
+    case 'DECLINE':
+    case 'REJECT':
+    case 'NO':
+      if (state.currentApplicant) makeDecision('deny');
+      else addText('No application to deny.', EGA.LGRAY);
+      break;
+    case 'FLAG':
+    case 'FRAUD':
+    case 'REPORT':
+    case 'INVESTIGATE':
+      if (state.currentApplicant) makeDecision('flag');
+      else addText('No application to flag.', EGA.LGRAY);
+      break;
+    case 'TALK':
+    case 'ASK':
+      if (obj.includes('GRIGGS') || obj.includes('BOSS') || obj.includes('MANAGER')) {
+        talkGriggs();
+      } else {
+        addText('There\'s nobody by that name here right now.', EGA.LGRAY);
+      }
+      break;
+    case 'DESK':
+    case 'INVENTORY':
+    case 'INV':
+    case 'I':
+      showDesk();
+      break;
+    case 'NOTES':
+    case 'HISTORY':
+    case 'PREVIOUS':
+      showNotes();
+      break;
+    case 'APPLICATION':
+    case 'APP':
+      openDoc('APPLICATION');
+      break;
+    case 'CREDIT':
+      openDoc('CREDIT');
+      break;
+    case 'PAYSTUBS':
+    case 'PAY':
+    case 'STUBS':
+      openDoc('PAYSTUBS');
+      break;
+    case 'EMPLOYMENT':
+    case 'LETTER':
+    case 'EMPLOY':
+      openDoc('EMPLOYMENT');
+      break;
+    case 'APPRAISAL':
+    case 'PROPERTY':
+      openDoc('APPRAISAL');
+      break;
+    default:
+      addText('Unknown command. Type HELP for available commands.', EGA.DGRAY);
+      break;
+  }
+}
+
+function handleEnter() {
+  switch(state.screen) {
+    case 'title':
+      startGame();
+      break;
+    case 'intro':
+      startDay(1);
+      break;
+    case 'dialog':
+      advanceDialog();
+      break;
+    case 'next_app':
+      nextApplicant();
+      break;
+    case 'blackwood_react':
+      clearOutput();
+      startDialog(state.blackwoodReactKey, () => {
+        state.screen = 'next_app';
+        addText('[Press ENTER for next applicant]', EGA.DGRAY);
+      });
+      break;
+    case 'day_end':
+      if (state.day < 5) {
+        startDay(state.day + 1);
+      } else {
+        showEnding();
+      }
+      break;
+    case 'ending':
+      break;
+  }
+}
+
+function showHelp() {
+  addText('═══════════════════════════════════════════════════', EGA.BLUE);
+  addText('                 AVAILABLE COMMANDS', EGA.YELLOW);
+  addText('═══════════════════════════════════════════════════', EGA.BLUE);
+  addText('  OPEN APPLICATION  - Read the loan application form', EGA.WHITE);
+  addText('  OPEN CREDIT       - Read the credit bureau report', EGA.WHITE);
+  addText('  OPEN PAYSTUBS     - Read the pay stub', EGA.WHITE);
+  addText('  OPEN EMPLOYMENT   - Read employment verification', EGA.WHITE);
+  addText('  OPEN APPRAISAL    - Read property appraisal report', EGA.WHITE);
+  addSpacer();
+  addText('  CHECK             - Run automated guideline checks', EGA.LGREEN);
+  addText('  RULES             - Display the lending guidelines', EGA.LGREEN);
+  addSpacer();
+  addText('  APPROVE           - Approve the loan application', EGA.LCYAN);
+  addText('  DENY              - Deny the loan application', EGA.LCYAN);
+  addText('  FLAG              - Flag application for fraud', EGA.LCYAN);
+  addSpacer();
+  addText('  LOOK              - Look around the office', EGA.LGRAY);
+  addText('  DESK              - See what\'s on your desk', EGA.LGRAY);
+  addText('  NOTES             - Review previous applicant SSNs', EGA.LGRAY);
+  addText('  TALK GRIGGS       - Speak to your boss', EGA.LGRAY);
+  addText('  HELP              - Show this command list', EGA.LGRAY);
+  addText('═══════════════════════════════════════════════════', EGA.BLUE);
+}
+
+function lookAround() {
+  drawOffice();
+  addText('You\'re sitting at your desk in the loan processing department', EGA.LGRAY);
+  addText('of First Federal Savings Bank.', EGA.LGRAY);
+  addSpacer();
+  addText('A window to your left shows the Portland skyline. Rain streaks', EGA.LGRAY);
+  addText('down the glass, as usual. A clock on the wall reads 9:' + (15 + state.appIndex * 20) + ' AM.', EGA.LGRAY);
+  addSpacer();
+  addText('On your desk: a computer terminal (green phosphor screen),', EGA.LGRAY);
+  addText('a telephone, a coffee mug (lukewarm), a pen holder, and', EGA.LGRAY);
+  addText('a stack of loan application folders.', EGA.LGRAY);
+  addSpacer();
+  addText('A filing cabinet stands to your right. Above it, a framed', EGA.LGRAY);
+  addText('certificate reads "First Federal - Integrity First."', EGA.LGRAY);
+  addSpacer();
+  addText('Mr. Griggs\' office is visible through a glass partition', EGA.LGRAY);
+  addText('behind you. He appears to be on the phone.', EGA.LGRAY);
+  if (state.currentApplicant) {
+    addSpacer();
+    addText('Current applicant: ' + state.currentApplicant.name, EGA.YELLOW);
+  }
+}
+
+function openDoc(docType) {
+  if (!state.currentApplicant) {
+    addText('No application is currently on your desk.', EGA.LGRAY);
+    return;
+  }
+  const a = state.currentApplicant;
+  const dt = docType.toUpperCase().replace(/\s+/g, '');
+  drawDocView();
+  addSpacer();
+
+  if (dt.includes('APP') || dt.includes('FORM') || dt.includes('LOAN')) {
+    addText(formatApplication(a), EGA.WHITE);
+    state.docsOpened.add('app');
+  } else if (dt.includes('CREDIT') || dt.includes('REPORT') || dt.includes('SCORE')) {
+    addText(formatCredit(a), EGA.WHITE);
+    state.docsOpened.add('credit');
+  } else if (dt.includes('PAY') || dt.includes('STUB') || dt.includes('INCOME') || dt.includes('SALARY')) {
+    addText(formatPayStubs(a), EGA.WHITE);
+    state.docsOpened.add('pay');
+  } else if (dt.includes('EMPLOY') || dt.includes('LETTER') || dt.includes('VERIF') || dt.includes('JOB')) {
+    addText(formatEmployment(a), EGA.WHITE);
+    state.docsOpened.add('employ');
+  } else if (dt.includes('APPRAIS') || dt.includes('PROPERTY') || dt.includes('VALUE') || dt.includes('HOME') || dt.includes('HOUSE')) {
+    addText(formatAppraisal(a), EGA.WHITE);
+    state.docsOpened.add('appraisal');
+  } else {
+    drawOffice();
+    addText('Unknown document. Try: APPLICATION, CREDIT, PAYSTUBS, EMPLOYMENT, APPRAISAL', EGA.LGRAY);
+  }
+}
+
+function showDesk() {
+  addText('On your desk:', EGA.YELLOW);
+  if (state.currentApplicant) {
+    addText('  Application folder: ' + state.currentApplicant.name, EGA.WHITE);
+    addText('  Documents reviewed: ' + (state.docsOpened.size === 0 ? 'None yet' :
+      [...state.docsOpened].map(d => {
+        return {app:'Application',credit:'Credit Report',pay:'Pay Stubs',employ:'Employment Letter',appraisal:'Appraisal'}[d];
+      }).join(', ')), EGA.LGRAY);
+  } else {
+    addText('  No current application.', EGA.LGRAY);
+  }
+  addText('  Lending Guidelines manual', EGA.LGRAY);
+  addText('  Coffee mug (lukewarm)', EGA.LGRAY);
+  addText('  Telephone', EGA.LGRAY);
+  addText('  Personal notepad with previous SSNs', EGA.LGRAY);
+}
+
+function showNotes() {
+  addText('═══ YOUR NOTES - PREVIOUS APPLICANT SSNs ═══', EGA.YELLOW);
+  const entries = Object.entries(state.previousSSNs);
+  if (entries.length === 0) {
+    addText('  No previous applicants recorded yet.', EGA.LGRAY);
+  } else {
+    entries.forEach(([ssn, name]) => {
+      addText('  ' + name + ': ' + ssn, EGA.WHITE);
+    });
+  }
+  addSpacer();
+  addText('Compare these against current applicant documents', EGA.DGRAY);
+  addText('to check for duplicate SSNs or identity theft.', EGA.DGRAY);
+}
+
+function talkGriggs() {
+  if (state.day === 3 && state.currentApplicant && state.currentApplicant.name === 'Thomas Blackwood' && !state.madeDecision) {
+    addText('Griggs (from his office):', EGA.YELLOW);
+    addText('  "You know what to do with that Blackwood file, right?"', EGA.WHITE);
+    addText('  "Don\'t make this harder than it needs to be."', EGA.WHITE);
+  } else if (state.day >= 4 && state.blackwoodChoice === 'deny') {
+    addText('Griggs glares at you from behind his glass partition.', EGA.LGRAY);
+    addText('He doesn\'t seem interested in talking.', EGA.LGRAY);
+  } else if (state.day >= 4 && state.blackwoodChoice === 'flag') {
+    addText('Griggs\' office is empty. He called in sick today.', EGA.LGRAY);
+  } else {
+    addText('Griggs (not looking up from his papers):', EGA.YELLOW);
+    addText('  "Just follow the guidelines, kid. That\'s all you gotta do."', EGA.WHITE);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// INPUT HANDLING
+// ═══════════════════════════════════════════════════════════════
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    const val = input.value;
+    if (val.trim()) {
+      addText('> ' + val, EGA.LGREEN);
+    }
+    input.value = '';
+    processCommand(val);
+    sfxType();
+  }
+});
+
+// Click anywhere to focus input
+document.getElementById('game').addEventListener('click', () => input.focus());
+
+// ═══════════════════════════════════════════════════════════════
+// INITIALIZATION
+// ═══════════════════════════════════════════════════════════════
+function init() {
+  drawTitle();
+  addText('═══════════════════════════════════════════════════', EGA.BLUE);
+  addText('      LOAN QUEST: THE UNDERWRITER\'S BURDEN', EGA.YELLOW);
+  addText('═══════════════════════════════════════════════════', EGA.BLUE);
+  addSpacer();
+  addText('   A Sierra-Style Credit Analyst Adventure', EGA.LCYAN);
+  addText('         First Federal Savings Bank', EGA.LGRAY);
+  addText('               Portland, 1987', EGA.LGRAY);
+  addSpacer();
+  addText('Press ENTER to begin.', EGA.WHITE);
+  updateStatus();
+  input.focus();
+}
+
+init();
+</script>
+</body>
+</html>
